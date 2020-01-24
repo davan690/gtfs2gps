@@ -24,6 +24,12 @@
 #' poa <- gtfs2gps(system.file("extdata/poa.zip", package="gtfs2gps"))
 #' }
 
+gtfs_data =system.file("extdata/poa.zip", package="gtfs2gps")
+spatial_resolution = 50
+cores = 1
+progress = TRUE
+continue = FALSE
+
 gtfs2gps <- function(gtfs_data, filepath = NULL, spatial_resolution = 15, cores = NULL, progress = TRUE, continue = FALSE){
 ###### PART 1. Load and prepare data inputs ------------------------------------
 
@@ -50,6 +56,9 @@ gtfs2gps <- function(gtfs_data, filepath = NULL, spatial_resolution = 15, cores 
     # all_shapeids <- unique(shapes_sf$shape_id)
     # shapeid <- all_shapeids[2]
 
+    
+profvis::profvis({ # 6666666666666666666666666666666666666666666666666666
+
     ## Select corresponding route, route type, stops and shape of that trip
 
     # identify route id
@@ -72,29 +81,18 @@ gtfs2gps <- function(gtfs_data, filepath = NULL, spatial_resolution = 15, cores 
     stops_seq[gtfs_data$stops, on = "stop_id", c('stop_lat', 'stop_lon') := list(i.stop_lat, i.stop_lon)] # add lat long info
 
     # convert stops to sf
-    stops_sf <- sfheaders::sf_point(stops_seq, x = "stop_lon", y="stop_lat", keep = T)
-    sf::st_crs(stops_sf) <- sf::st_crs(shapes_sf)
-    
-    spatial_resolution <- units::set_units(spatial_resolution / 1000, "km")
-    
-    # # old (slower) version
-    # new_shape <- subset(shapes_sf, shape_id == shapeid) %>%
-    #   sf::st_segmentize(spatial_resolution) %>%
-    #   sf::st_cast("LINESTRING") %>%
-    #   sf::st_cast("POINT", warn = FALSE)  %>% 
-    #   sf::st_sf()
+    stops_sf <- sf::st_as_sf(stops_seq, coords = c('stop_lon', 'stop_lat'), agr = "identity", crs = sf::st_crs(shapes_sf))
 
-    # new faster verion using sfheaders
+    spatial_resolution <- units::set_units(spatial_resolution / 1000, "km")
+
     new_shape <- subset(shapes_sf, shape_id == shapeid) %>%
       sf::st_segmentize(spatial_resolution) %>%
-      sfheaders::sf_to_df(fill = T) %>%
-      sfheaders::sf_point( x = "x", y="y", keep = T)
+      sf::st_cast("LINESTRING") %>%
+      sf::st_cast("POINT", warn = FALSE) %>%
+      sf::st_sf()
 
-  
-    # convert units of spatial resolution to meters
     spatial_resolution <- units::set_units(spatial_resolution, "m")
     
-    # snap stops the nodes of the shape route
     snapped <- cpp_snap_points(stops_sf %>% sf::st_coordinates(), 
                                      new_shape %>% sf::st_coordinates(),
                                      spatial_resolution,
@@ -121,9 +119,17 @@ gtfs2gps <- function(gtfs_data, filepath = NULL, spatial_resolution = 15, cores 
     new_stoptimes[stops_seq$ref, "stop_sequence"] <- stops_seq$stop_sequence
 
     # calculate Distance between successive points
-    new_stoptimes[, dist := rcpp_distance_haversine(shape_pt_lat, shape_pt_lon, data.table::shift(shape_pt_lat, type = "lead"), data.table::shift(shape_pt_lon, type = "lead"), tolerance = 1e10)]
+    # new_stoptimes[, dist := rcpp_distance_haversine(shape_pt_lat, shape_pt_lon, data.table::shift(shape_pt_lat, type = "lead"), data.table::shift(shape_pt_lon, type = "lead"), tolerance = 1e10)]
+    new_stoptimes[ , dist := geosphere::distGeo(matrix(c(shape_pt_lon, shape_pt_lat), ncol = 2),
+                                                matrix(c(data.table::shift(shape_pt_lon, type="lead"), data.table::shift(shape_pt_lat, type="lead")), ncol = 2))/1000]
+    
     new_stoptimes <- na.omit(new_stoptimes, cols = "dist")
 
+    
+  }) # 6666666666666666666666666666666666666666666666666666
+    
+    
+    
     ###### PART 2.2 Function recalculate new stop_times for each trip id of each Shape id ------------------------------
     if(test_gtfs_freq(gtfs_data) == "frequency"){
       new_stoptimes <- lapply(X = all_tripids, FUN = update_freq, new_stoptimes, gtfs_data, all_tripids) %>% data.table::rbindlist()
